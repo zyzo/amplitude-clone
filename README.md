@@ -38,6 +38,27 @@ npm start
 
 `npm run dev` runs the TypeScript API and separate worker with file watching. In deployment, scale workers independently with `docker compose up --scale worker=3 -d`; the default topic has three partitions. To run locally without Compose, start `npm run dev:server` and `npm run dev:worker` in separate terminals (or `npm start` and `npm run worker`). Set `INGESTION_RATE_LIMIT` to change the initial per-IP request limit (default 120 per minute). `KAFKA_BROKERS` (comma-separated, default `localhost:9092`), `KAFKA_TOPIC` (default `analytics.events`), `KAFKA_PROCESSED_TOPIC` (default `analytics.events.processed`), `KAFKA_WORKER_GROUP` (default `analytics-event-workers`), and `KAFKA_NOTIFICATION_GROUP` (default `analytics-event-notifications`) configure ingestion, processing, and live-update notifications. Do not enable proxy address trust unless the deployment has a controlled reverse proxy. Terminate TLS at that proxy for remote use.
 
+## Ingestion batching and backpressure
+
+The API coalesces whole ingestion requests into acknowledged Kafka publications, retaining idempotent production and `acks: -1`. A partial batch flushes after 2 ms; a full batch flushes immediately. Only one batch is sent at a time. HTTP 202 is returned only after that request's publication succeeds, never merely after entering the in-memory buffer.
+
+Configure these API settings in the environment (also forwarded by both Compose stacks):
+
+| Variable | Default | Meaning |
+| --- | ---: | --- |
+| `INGESTION_BATCH_FLUSH_MS` | 2 | Maximum batching delay when the producer is idle; queued requests may wait longer behind an in-flight send |
+| `INGESTION_BATCH_MAX_EVENTS` | 100 | Maximum events per publication |
+| `INGESTION_BATCH_MAX_BYTES` | 262144 | Maximum estimated bytes per publication |
+| `INGESTION_BUFFER_MAX_EVENTS` | 10000 | Maximum queued **plus in-flight** events |
+| `INGESTION_BUFFER_MAX_BYTES` | 16777216 | Maximum estimated queued **plus in-flight** bytes |
+| `INGESTION_SHUTDOWN_TIMEOUT_MS` | 10000 | Publication drain deadline during shutdown |
+
+Limits must be positive integers, and buffer limits must be at least as large as batch limits. Byte accounting includes UTF-8 keys/payloads and a conservative 128-byte allowance per event; it is not a precise heap-memory measurement. Keep the batch byte limit below your Kafka broker/topic request limits. Requests are never split between publications: lowering batch limits below the size of a valid HTTP request can cause that request to be rejected.
+
+When capacity is exhausted, a request exceeds batch limits, or publication fails, the API returns the existing retryable `503 EVENT_QUEUE_UNAVAILABLE` response. Retry with the original event IDs: an unsuccessful acknowledgment does not prove Kafka received nothing. Failed sends release buffer capacity; successful later requests can continue. Requests queued in memory are not durable until Kafka acknowledges them.
+
+On shutdown the API stops accepting new publications, flushes queued work, and rejects unresolved requests at the drain deadline. The process also enforces an overall shutdown deadline three seconds later because Kafka disconnection may wait on network requests. Configure the container/orchestrator termination grace period to exceed that overall deadline (the default production Compose grace period is 15 seconds). Structured `Ingestion publication metrics` logs every 10 seconds of activity include buffer depth, rejection counts, batch outcomes, and the last batch's queue wait and publication duration. Batching does not change the asynchronous database-processing or SSE-delivery guarantees.
+
 ## API
 
 The OpenAPI document is available at `GET /openapi.json`. All errors use `{ "error": { "code", "message", "details"? }, "request_id" }`.
@@ -117,3 +138,5 @@ docker compose -f compose.test.yaml run --build --rm integration-test
 ```
 
 The test database lives in a temporary filesystem and is separate from the deployment database. It is discarded when its container is removed. The test runner uses the same Docker build stage as the application build, including development dependencies. For local Node.js testing instead, set `TEST_DATABASE_URL` to a disposable PostgreSQL database whose name ends in `_test`; tests truncate its `events` table.
+
+Batcher unit tests always run. To also verify acknowledgment and message preservation against a real Kafka broker, set `TEST_KAFKA_BROKERS` (comma-separated broker addresses) when running `npm test`. That integration test creates uniquely named topics and deletes them afterward; it is skipped when the variable is absent, including in the PostgreSQL-only test Compose stack.

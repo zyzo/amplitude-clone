@@ -7,6 +7,7 @@ import { buildApp } from '../src/app.js';
 import { createPool, type DatabasePool } from '../src/db.js';
 import { migrate } from '../src/migrate.js';
 import { handleEvent, type EventQueue, type InputEvent, type StreamEvent } from '../src/events.js';
+import { EventBatcher } from '../src/event-batcher.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const token = 'test-admin-token-at-least-thirty-two-chars';
@@ -217,6 +218,61 @@ if (!databaseUrl) {
     assert.deepEqual(day.json().buckets.map((bucket: { start: string; total: number }) => [bucket.start, bucket.total]), [
       ['2026-09-30T00:00:00.000Z', 1], ['2026-10-01T00:00:00.000Z', 0],
     ]);
+  });
+
+  test('batched ingestion waits for acknowledgment and reports bounded-buffer overload as retryable 503', async () => {
+    let acknowledge!: () => void;
+    const ack = new Promise<void>((resolve) => { acknowledge = resolve; });
+    const batcher = new EventBatcher(() => ack, { maxBatchEvents: 1, maxBufferedEvents: 1 });
+    const batchingApp = await buildApp(config(), pool, {
+      start: async () => {}, enqueue: (events) => batcher.enqueue(events), close: () => batcher.close(),
+    });
+    let responded = false;
+    try {
+      const first = batchingApp.inject({ method: 'POST', url: '/events', payload: { events: [event()] } })
+        .then((response) => { responded = true; return response; });
+      for (let i = 0; i < 100 && batcher.getStats().inFlightEvents === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      }
+      assert.equal(batcher.getStats().inFlightEvents, 1);
+      assert.equal(responded, false);
+      const excess = await batchingApp.inject({ method: 'POST', url: '/events', payload: { events: [event()] } });
+      assert.equal(excess.statusCode, 503);
+      assert.equal(excess.json().error.code, 'EVENT_QUEUE_UNAVAILABLE');
+      acknowledge();
+      assert.equal((await first).statusCode, 202);
+    } finally {
+      acknowledge();
+      await batchingApp.close();
+    }
+  });
+
+  test('batched publication failures return 503 instead of acknowledging acceptance', async () => {
+    const batcher = new EventBatcher(async () => { throw new Error('Kafka unavailable'); });
+    const batchingApp = await buildApp(config(), pool, {
+      start: async () => {}, enqueue: (events) => batcher.enqueue(events), close: () => batcher.close(),
+    });
+    try {
+      const response = await batchingApp.inject({ method: 'POST', url: '/events', payload: { events: [event()] } });
+      assert.equal(response.statusCode, 503);
+      assert.equal(response.json().error.code, 'EVENT_QUEUE_UNAVAILABLE');
+    } finally {
+      await batchingApp.close();
+    }
+  });
+
+  test('preClose drains and deadlines stalled publication before waiting for active HTTP requests', async () => {
+    const batcher = new EventBatcher(() => new Promise<void>(() => {}), { maxBatchEvents: 1, shutdownTimeoutMs: 20 });
+    const batchingApp = await buildApp(config(), pool, {
+      start: async () => {}, enqueue: (events) => batcher.enqueue(events), close: () => batcher.close(),
+    });
+    const response = batchingApp.inject({ method: 'POST', url: '/events', payload: { events: [event()] } }).then((result) => result);
+    for (let i = 0; i < 100 && batcher.getStats().inFlightEvents === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    assert.equal(batcher.getStats().inFlightEvents, 1);
+    await batchingApp.close();
+    assert.equal((await response).statusCode, 503);
   });
 
   test('ingestion enforces its per-IP request limit', async () => {
