@@ -15,6 +15,33 @@ services:
       timeout: 3s
       retries: 10
 
+  kafka:
+    image: apache/kafka:3.9.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_LISTENERS: PLAINTEXT://:29092,PLAINTEXT_HOST://:9092,CONTROLLER://:29093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:29093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+    ports:
+      - "127.0.0.1:9092:9092"
+    volumes:
+      - dev_kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:29092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
   api:
     build:
       context: .
@@ -26,6 +53,11 @@ services:
       PORT: 3000
       INGESTION_RATE_LIMIT: ${INGESTION_RATE_LIMIT:-120}
       DASHBOARD_ORIGIN: ${DASHBOARD_ORIGIN:-}
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-analytics.events}
+      KAFKA_PROCESSED_TOPIC: ${KAFKA_PROCESSED_TOPIC:-analytics.events.processed}
+      KAFKA_WORKER_GROUP: ${KAFKA_WORKER_GROUP:-analytics-event-workers}
+      KAFKA_NOTIFICATION_GROUP: ${KAFKA_NOTIFICATION_GROUP:-analytics-event-notifications}
     ports:
       - "127.0.0.1:3002:3000"
     volumes:
@@ -34,7 +66,34 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
     init: true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  worker:
+    build:
+      context: .
+      target: development
+    command: ["npm", "run", "dev:worker"]
+    environment:
+      DATABASE_URL: postgres://analytics:local-development-password@db:5432/analytics
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-analytics.events}
+      KAFKA_PROCESSED_TOPIC: ${KAFKA_PROCESSED_TOPIC:-analytics.events.processed}
+      KAFKA_WORKER_GROUP: ${KAFKA_WORKER_GROUP:-analytics-event-workers}
+    volumes:
+      - ./src:/app/src
+    depends_on:
+      api:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
 
 volumes:
   dev_postgres_data:
+  dev_kafka_data:

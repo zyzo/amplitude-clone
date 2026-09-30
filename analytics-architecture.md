@@ -13,12 +13,17 @@ Assume modest traffic, one backend instance, and live updates within a few secon
 ## Architecture
 
 ```text
-Event producers -- HTTP batches --> Backend API --> PostgreSQL
-Admin dashboard -- analytics queries --> Backend API
-Admin dashboard <-- live SSE updates -- Backend API
+Event producers -- HTTP batches --> Ingestion API -- durable publish --> Kafka
+                                                                        |
+                                                              scalable workers
+                                                                        |
+                                                                    PostgreSQL
+Admin dashboard -- analytics queries --> Ingestion API
+Admin dashboard <-- live SSE updates -- Ingestion API <-- processed-topic notifications
+                                           Kafka <-- worker publishes after commit
 ```
 
-Use one backend, one PostgreSQL database, and one dashboard. Query raw events initially. No message broker, cache, or separate analytics service.
+Run the ingestion API separately from Kafka workers. Scale stateless API instances for HTTP throughput and worker instances for database handling; Kafka buffers between them. The API consumes a separate processed-events topic for live SSE notifications. Local Compose uses a single-node KRaft broker and one PostgreSQL database; production Kafka should use appropriate replication and availability. Query raw events initially.
 
 ## Event schema and unique IDs
 
@@ -55,21 +60,22 @@ Index `occurred_at` and `(type, occurred_at)`. Store timestamps in UTC; use UTC 
 
 - Flush when 20 events accumulate or 1 second passes after the first queued event, whichever comes first.
 - Validate the entire batch; reject malformed batches with a clear 4xx response. Limit requests to 100 events and a bounded payload size.
-- Insert valid batches in one transaction, ignoring existing IDs with `ON CONFLICT (id) DO NOTHING`.
-- Acknowledge only after commit. Return inserted and duplicate counts; duplicates are successful delivery.
+- Publish validated events to Kafka, keyed by event UUID, and acknowledge with HTTP 202 only after the broker confirms the records.
+- Workers consume events and insert them in PostgreSQL with `ON CONFLICT (id) DO NOTHING`. After the DB transaction, publish the stored event to a processed-events topic, then commit the input offset. A crash between these steps can redeliver and repeat the notification, so insertion and downstream notification consumers must be idempotent.
+- Return the number accepted by Kafka, not database insert/duplicate counts; duplicates are resolved asynchronously.
 - Retry network errors, 429s, and 5xx responses with exponential backoff and jitter, preserving event IDs. Do not blindly retry validation errors.
 
-Batching reduces HTTP and database overhead, at the cost of up to roughly one second of collection delay. An in-memory producer buffer can lose unsent events if the page or process exits; durable producer buffering is outside the initial scope.
+Batching reduces HTTP and broker overhead. Kafka provides durable buffering between receipt and handling. An in-memory producer buffer can still lose unsent producer events if the page or process exits; durable producer buffering is outside the initial scope.
 
 ## Dashboard modes
 
 ### Real-time
 
-`GET /events/stream` provides Server-Sent Events (SSE). Publish only newly inserted events after commit; duplicates must not increase counters.
+`GET /events/stream` provides Server-Sent Events (SSE). Workers publish processed events only after the database commit. Notifications can repeat when Kafka redelivers after a partial failure; dashboard clients reconcile by event UUID so duplicates do not increase counters.
 
 Show recent activity and click/view counters for a clearly labeled window, such as today in UTC. Initialize from the database. On connection or reconnection, establish the stream and refresh the database snapshot; buffer live updates during refresh and reconcile by event ID to avoid overlap or gaps. Refresh counters from the database periodically.
 
-SSE is a live notification channel, not a durable log. Database refreshes recover from missed notifications. Keep the initial deployment to one backend process so all subscriptions see ingestion activity.
+SSE is a live notification channel, not a durable log. Database refreshes recover from missed notifications. SSE subscriptions remain process-local. Each API replica needs its own processed-topic consumer group (or another broadcast mechanism) so every replica receives notifications for its connected clients.
 
 ### Analytics
 
@@ -99,4 +105,4 @@ Native browser `EventSource` cannot set the authorization header. Use a fetch-ba
 - Committed events appear live; reconnecting restores database-backed state without double counting.
 - Missing or incorrect tokens cannot access any admin data endpoint or stream.
 
-Add precomputed aggregates only when historical queries become slow. Add a durable ingestion queue only when bursts exceed database capacity. Multiple backend processes will require shared live-update distribution.
+Add precomputed aggregates only when historical queries become slow. Kafka is the durable ingestion queue; monitor consumer lag and scale consumers when handling falls behind. Multiple API processes will require shared live-update distribution.

@@ -7,17 +7,10 @@ import swagger from '@fastify/swagger';
 import { z } from 'zod';
 import type { DatabasePool } from './db.js';
 import type { Config } from './config.js';
+import type { EventQueue, EventType, InputEvent, StreamEvent } from './events.js';
 
-type EventType = 'click' | 'view';
-interface InputEvent {
-  id: string;
-  occurred_at: string;
-  type: EventType;
-  target_id: string;
-}
 interface EventBody { events: InputEvent[] }
 interface AnalyticsQuery { from: string; to: string; interval: 'minute' | 'hour' | 'day'; type?: EventType }
-interface StreamEvent extends InputEvent { received_at: string }
 
 const timestampPattern = '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,3})?(?:Z|[+-]\\d{2}:\\d{2})$';
 const timestampValue = z.iso.datetime({ offset: true }).refine((value) => {
@@ -71,7 +64,7 @@ function authorized(request: FastifyRequest, token: string): boolean {
   return timingSafeEqual(expected, actual);
 }
 
-export async function buildApp(config: Config, pool: DatabasePool): Promise<FastifyInstance> {
+export async function buildApp(config: Config, pool: DatabasePool, eventQueue: EventQueue): Promise<FastifyInstance> {
   const app = Fastify({
     logger: { redact: ['req.headers.authorization', 'request.headers.authorization', 'headers.authorization'] },
     bodyLimit: 128 * 1024,
@@ -114,6 +107,7 @@ export async function buildApp(config: Config, pool: DatabasePool): Promise<Fast
   app.addHook('onClose', async () => {
     for (const response of subscribers) response.end();
     subscribers.clear();
+    await eventQueue.close();
   });
   const publish = (event: StreamEvent) => {
     const frame = `id: ${event.id}\nevent: event\ndata: ${JSON.stringify(event)}\n\n`;
@@ -129,6 +123,7 @@ export async function buildApp(config: Config, pool: DatabasePool): Promise<Fast
       }
     }
   };
+  await eventQueue.start(async (event) => publish(event));
 
   app.get('/health/live', {
     schema: { tags: ['health'], response: { 200: { type: 'object', properties: { status: { type: 'string' } } } } },
@@ -164,45 +159,26 @@ export async function buildApp(config: Config, pool: DatabasePool): Promise<Fast
         } } },
       },
       response: {
-        200: { type: 'object', required: ['inserted', 'duplicates'], additionalProperties: false, properties: {
-          inserted: { type: 'integer' }, duplicates: { type: 'integer' },
+        202: { type: 'object', required: ['accepted'], additionalProperties: false, properties: {
+          accepted: { type: 'integer' },
         } },
-        400: errorSchema, 429: errorSchema,
+        400: errorSchema, 429: errorSchema, 503: errorSchema,
       },
     },
-  }, async (request) => {
+  }, async (request, reply) => {
     const parsedBody = eventBodySchema.safeParse(request.body);
     if (!parsedBody.success) throw new HttpError(400, 'VALIDATION_ERROR', 'Request validation failed', zodDetails(parsedBody.error, ''));
     const events = parsedBody.data.events;
     if (events.some((event) => event.target_id.trim().length === 0)) {
       throw new HttpError(400, 'INVALID_TARGET', 'target_id must not be blank');
     }
-    const client = await pool.connect();
     try {
-      await client.query('BEGIN');
-      const insertedEvents: StreamEvent[] = [];
-      for (const event of events) {
-        const result = await client.query<{ id: string; occurred_at: Date; type: EventType; target_id: string; received_at: Date }>(
-          `INSERT INTO events (id, occurred_at, type, target_id)
-           VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING
-           RETURNING id, occurred_at, type, target_id, received_at`,
-          [event.id, event.occurred_at, event.type, event.target_id],
-        );
-        const row = result.rows[0];
-        if (row) insertedEvents.push({
-          id: row.id, occurred_at: row.occurred_at.toISOString(), type: row.type,
-          target_id: row.target_id, received_at: row.received_at.toISOString(),
-        });
-      }
-      await client.query('COMMIT');
-      for (const event of insertedEvents) publish(event);
-      return { inserted: insertedEvents.length, duplicates: events.length - insertedEvents.length };
+      await eventQueue.enqueue(events);
     } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
+      request.log.error({ message: error instanceof Error ? error.message : 'Unknown error' }, 'Event queue unavailable');
+      throw new HttpError(503, 'EVENT_QUEUE_UNAVAILABLE', 'Events could not be accepted; retry the request');
     }
+    return reply.status(202).send({ accepted: events.length });
   });
 
   app.get('/events/snapshot', {

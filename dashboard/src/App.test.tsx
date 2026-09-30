@@ -103,10 +103,11 @@ describe('dashboard', () => {
     await user.click(screen.getByRole('button', { name: /connect/i }));
     await user.click(await screen.findByRole('button', { name: 'Historical analytics' }));
     await screen.findByRole('heading', { name: 'Access denied' });
-    fireEvent.change(screen.getByLabelText(/from/i), { target: { value: '2026-09-30T12:00' } });
-    fireEvent.change(screen.getByLabelText(/to/i), { target: { value: '2026-09-30T09:00' } });
+    const requestsBeforeInvalidRange = unauthorizedFetch.mock.calls.length;
+    fireEvent.change(screen.getByLabelText(/from/i), { target: { value: '2099-01-01T00:00' } });
+    fireEvent.change(screen.getByLabelText(/to/i), { target: { value: '2000-01-01T00:00' } });
     expect(await screen.findByText(/start time must be earlier/i)).toBeTruthy();
-    expect(unauthorizedFetch).toHaveBeenCalledTimes(2);
+    expect(unauthorizedFetch).toHaveBeenCalledTimes(requestsBeforeInvalidRange);
   });
 
   it('shows a clear empty state when the selected range has no matching events', async () => {

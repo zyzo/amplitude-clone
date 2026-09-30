@@ -6,6 +6,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { createPool, type DatabasePool } from '../src/db.js';
 import { migrate } from '../src/migrate.js';
+import { handleEvent, type EventQueue, type InputEvent, type StreamEvent } from '../src/events.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const token = 'test-admin-token-at-least-thirty-two-chars';
@@ -14,6 +15,28 @@ let app: FastifyInstance;
 
 function event(overrides: Record<string, unknown> = {}) {
   return { id: randomUUID(), occurred_at: '2026-09-30T10:00:00Z', type: 'click', target_id: 'signup', ...overrides };
+}
+
+class TestEventQueue implements EventQueue {
+  private handler?: (event: StreamEvent) => Promise<void>;
+  async start(handler: (event: StreamEvent) => Promise<void>) { this.handler = handler; }
+  async enqueue(events: InputEvent[]) {
+    if (!this.handler) throw new Error('Queue has not started');
+    for (const event of events) {
+      const handled = await handleEvent(pool, event);
+      if (handled.inserted) await this.handler(handled.event);
+    }
+  }
+  async close() {}
+}
+
+function config(ingestionRateLimit = 10000) {
+  return {
+    databaseUrl: databaseUrl!, apiToken: token, host: '127.0.0.1', port: 0, ingestionRateLimit,
+    kafkaBrokers: ['localhost:9092'], kafkaTopic: 'analytics.events',
+    kafkaProcessedTopic: 'analytics.events.processed', kafkaWorkerGroup: 'test-workers',
+    kafkaNotificationGroup: 'test-notifications',
+  };
 }
 
 async function post(events: unknown[]) {
@@ -34,7 +57,7 @@ if (!databaseUrl) {
   before(async () => {
     pool = createPool(databaseUrl);
     await migrate(pool);
-    app = await buildApp({ databaseUrl, apiToken: token, host: '127.0.0.1', port: 0, ingestionRateLimit: 10000 }, pool);
+    app = await buildApp(config(), pool, new TestEventQueue());
     await app.ready();
   });
   after(async () => {
@@ -47,10 +70,13 @@ if (!databaseUrl) {
     const first = event();
     const second = event({ type: 'view' });
     const initial = await post([first, second, first]);
-    assert.equal(initial.statusCode, 200);
-    assert.deepEqual(initial.json(), { inserted: 2, duplicates: 1 });
+    assert.equal(initial.statusCode, 202);
+    assert.deepEqual(initial.json(), { accepted: 3 });
     const repeats = await Promise.all([post([first, second]), post([first, second])]);
-    for (const repeat of repeats) assert.deepEqual(repeat.json(), { inserted: 0, duplicates: 2 });
+    for (const repeat of repeats) {
+      assert.equal(repeat.statusCode, 202);
+      assert.deepEqual(repeat.json(), { accepted: 2 });
+    }
     const stored = await pool.query('SELECT id, received_at FROM events');
     assert.equal(stored.rowCount, 2);
     assert.ok(stored.rows.every((row) => row.received_at instanceof Date));
@@ -75,12 +101,11 @@ if (!databaseUrl) {
     assert.equal(count.rows[0].count, 0);
   });
 
-  test('database error rolls back all rows in a batch', async () => {
+  test('database errors roll back event processing', async () => {
     await pool.query('TRUNCATE events');
     await pool.query("ALTER TABLE events ADD CONSTRAINT test_reject_target CHECK (target_id <> 'reject-me')");
     try {
-      const result = await post([event(), event({ target_id: 'reject-me' })]);
-      assert.equal(result.statusCode, 500);
+      await assert.rejects(handleEvent(pool, event({ target_id: 'reject-me' }) as InputEvent));
       const count = await pool.query('SELECT count(*)::int AS count FROM events');
       assert.equal(count.rows[0].count, 0);
     } finally {
@@ -91,7 +116,7 @@ if (!databaseUrl) {
   test('admin snapshot is protected and initializes current UTC-day activity', async () => {
     await pool.query('TRUNCATE events');
     const current = event({ occurred_at: new Date(Date.now() - 1_000).toISOString(), type: 'view' });
-    assert.deepEqual((await post([current])).json(), { inserted: 1, duplicates: 0 });
+    assert.deepEqual((await post([current])).json(), { accepted: 1 });
     const unauthorized = await app.inject('/events/snapshot');
     assert.equal(unauthorized.statusCode, 401);
     const wrongToken = await app.inject({ method: 'GET', url: '/events/snapshot', headers: { authorization: 'Bearer wrong-token' } });
@@ -104,7 +129,7 @@ if (!databaseUrl) {
 
   test('authenticated SSE publishes only newly committed events', async () => {
     await pool.query('TRUNCATE events');
-    const streamingApp = await buildApp({ databaseUrl, apiToken: token, host: '127.0.0.1', port: 0, ingestionRateLimit: 10000 }, pool);
+    const streamingApp = await buildApp(config(), pool, new TestEventQueue());
     const abort = new AbortController();
     try {
       await streamingApp.listen({ host: '127.0.0.1', port: 0 });
@@ -122,12 +147,14 @@ if (!databaseUrl) {
       assert.match(new TextDecoder().decode(initial.value), /connected/);
       const submitted = event({ occurred_at: new Date().toISOString() });
       const first = await streamingApp.inject({ method: 'POST', url: '/events', payload: { events: [submitted] } });
-      assert.deepEqual(first.json(), { inserted: 1, duplicates: 0 });
+      assert.equal(first.statusCode, 202);
+      assert.deepEqual(first.json(), { accepted: 1 });
       const liveFrame = new TextDecoder().decode((await reader.read()).value);
       assert.match(liveFrame, new RegExp(submitted.id));
       assert.match(liveFrame, /signup/);
       const retry = await streamingApp.inject({ method: 'POST', url: '/events', payload: { events: [submitted] } });
-      assert.deepEqual(retry.json(), { inserted: 0, duplicates: 1 });
+      assert.equal(retry.statusCode, 202);
+      assert.deepEqual(retry.json(), { accepted: 1 });
       const duplicateFrame = await Promise.race([
         reader.read().then(({ value }) => new TextDecoder().decode(value)),
         new Promise<string>((resolve) => setTimeout(() => resolve('no event'), 40)),
@@ -149,7 +176,7 @@ if (!databaseUrl) {
       event({ occurred_at: '2026-09-30T10:30:00+00:00', type: 'view' }),
       event({ occurred_at: '2026-09-30T12:00:00Z', type: 'view' }),
     ]);
-    assert.equal(inserted.statusCode, 200);
+    assert.equal(inserted.statusCode, 202);
     const result = await analytics('from=2026-09-30T10%3A00%3A00Z&to=2026-09-30T12%3A00%3A00Z&interval=hour');
     assert.equal(result.statusCode, 200);
     assert.deepEqual(result.json().buckets, [
@@ -179,7 +206,7 @@ if (!databaseUrl) {
   test('minute and day buckets align to UTC when producers use offsets', async () => {
     await pool.query('TRUNCATE events');
     const inserted = await post([event({ occurred_at: '2026-10-01T06:59:30+07:00', type: 'view' })]);
-    assert.equal(inserted.statusCode, 200);
+    assert.equal(inserted.statusCode, 202);
     const minute = await analytics('from=2026-09-30T23%3A59%3A00Z&to=2026-10-01T00%3A01%3A00Z&interval=minute');
     assert.equal(minute.statusCode, 200);
     assert.deepEqual(minute.json().buckets.map((bucket: { start: string; total: number }) => [bucket.start, bucket.total]), [
@@ -193,11 +220,11 @@ if (!databaseUrl) {
   });
 
   test('ingestion enforces its per-IP request limit', async () => {
-    const limited = await buildApp({ databaseUrl, apiToken: token, host: '127.0.0.1', port: 0, ingestionRateLimit: 1 }, pool);
+    const limited = await buildApp(config(1), pool, new TestEventQueue());
     try {
       await limited.ready();
       const first = await limited.inject({ method: 'POST', url: '/events', payload: { events: [event()] } });
-      assert.equal(first.statusCode, 200);
+      assert.equal(first.statusCode, 202);
       const second = await limited.inject({ method: 'POST', url: '/events', payload: { events: [event()] } });
       assert.equal(second.statusCode, 429);
       assert.equal(second.json().error.code, 'RATE_LIMITED');

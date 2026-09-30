@@ -1,10 +1,31 @@
-export interface Config {
+export interface KafkaConfig {
+  kafkaBrokers: string[];
+  kafkaTopic: string;
+  kafkaProcessedTopic: string;
+  kafkaWorkerGroup: string;
+  kafkaNotificationGroup: string;
+}
+
+export interface Config extends KafkaConfig {
   databaseUrl: string;
   apiToken: string;
   host: string;
   port: number;
   ingestionRateLimit: number;
   dashboardOrigin?: string;
+}
+
+export function loadKafkaConfig(env: NodeJS.ProcessEnv = process.env): KafkaConfig {
+  const kafkaBrokers = (env.KAFKA_BROKERS ?? 'localhost:9092').split(',').map((broker) => broker.trim()).filter(Boolean);
+  if (kafkaBrokers.length === 0) throw new Error('KAFKA_BROKERS must contain at least one broker');
+  const kafkaTopic = env.KAFKA_TOPIC?.trim() || 'analytics.events';
+  return {
+    kafkaBrokers,
+    kafkaTopic,
+    kafkaProcessedTopic: env.KAFKA_PROCESSED_TOPIC?.trim() || `${kafkaTopic}.processed`,
+    kafkaWorkerGroup: env.KAFKA_WORKER_GROUP?.trim() || env.KAFKA_CONSUMER_GROUP?.trim() || 'analytics-event-workers',
+    kafkaNotificationGroup: env.KAFKA_NOTIFICATION_GROUP?.trim() || 'analytics-event-notifications',
+  };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -30,5 +51,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       throw new Error('DASHBOARD_ORIGIN must be an HTTP(S) origin without a path');
     }
   }
-  return { databaseUrl, apiToken, host: env.HOST ?? '0.0.0.0', port, ingestionRateLimit, ...(dashboardOrigin ? { dashboardOrigin } : {}) };
+  return {
+    databaseUrl, apiToken, host: env.HOST ?? '0.0.0.0', port, ingestionRateLimit,
+    ...loadKafkaConfig(env),
+    ...(dashboardOrigin ? { dashboardOrigin } : {}),
+  };
 }
