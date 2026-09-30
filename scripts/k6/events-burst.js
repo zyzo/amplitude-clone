@@ -45,5 +45,5 @@ export default function () {
     JSON.stringify({ events: [event] }),
     { headers: { 'Content-Type': 'application/json' }, tags: { endpoint: 'ingest' } },
   );
-  check(response, { 'ingestion returned 200': (result) => result.status === 200 });
+  check(response, { 'ingestion returned 202': (result) => result.status === 202 });
 }

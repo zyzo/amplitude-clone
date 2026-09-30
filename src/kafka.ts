@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Kafka, type Admin, type Consumer, type Producer } from 'kafkajs';
 import type { DatabasePool } from './db.js';
 import { handleEvent, type EventQueue, type InputEvent, type StreamEvent } from './events.js';
+import { EventBatcher, type EventBatcherOptions } from './event-batcher.js';
 
 async function ensureTopics(admin: Admin, topics: string[]): Promise<void> {
   await admin.connect();
@@ -23,16 +24,22 @@ export class KafkaEventQueue implements EventQueue {
   private readonly kafka: Kafka;
   private readonly producer: Producer;
   private readonly notifier: Consumer;
+  private readonly batcher: EventBatcher;
   private running = false;
+  private closePromise: Promise<void> | undefined;
 
   constructor(
     brokers: string[],
     private readonly inputTopic: string,
     processedTopic: string,
     notificationGroup: string,
+    batching: Partial<EventBatcherOptions> = {},
   ) {
     this.kafka = new Kafka({ clientId: 'analytics-api', brokers });
     this.producer = this.kafka.producer({ idempotent: true, maxInFlightRequests: 1 });
+    this.batcher = new EventBatcher((messages) => this.producer.send({
+      topic: this.inputTopic, acks: -1, messages,
+    }), batching);
     this.notifier = this.kafka.consumer({ groupId: `${notificationGroup}-${randomUUID()}` });
     this.processedTopic = processedTopic;
   }
@@ -65,18 +72,31 @@ export class KafkaEventQueue implements EventQueue {
     }
   }
 
-  async enqueue(events: InputEvent[]): Promise<void> {
-    await this.producer.send({
-      topic: this.inputTopic,
-      acks: -1,
-      messages: events.map((event) => ({ key: event.id, value: JSON.stringify(event) })),
-    });
+  enqueue(events: InputEvent[]): Promise<void> {
+    if (!this.running) return Promise.reject(new Error('Event queue has not started'));
+    return this.batcher.enqueue(events);
   }
 
-  async close(): Promise<void> {
-    if (this.running) await this.notifier.stop();
-    await Promise.all([this.notifier.disconnect(), this.producer.disconnect()]);
-    this.running = false;
+  getIngestionStats() { return this.batcher.getStats(); }
+
+  close(): Promise<void> {
+    this.closePromise ??= this.disconnect();
+    return this.closePromise;
+  }
+
+  private async disconnect(): Promise<void> {
+    try {
+      // Flush and acknowledge accepted work before disconnecting the producer.
+      await this.batcher.close();
+    } finally {
+      this.running = false;
+      const results = await Promise.allSettled([
+        this.notifier.stop().finally(() => this.notifier.disconnect()),
+        this.producer.disconnect(),
+      ]);
+      const failure = results.find((result) => result.status === 'rejected');
+      if (failure?.status === 'rejected') throw failure.reason;
+    }
   }
 }
 

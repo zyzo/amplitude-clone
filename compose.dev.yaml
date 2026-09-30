@@ -52,6 +52,12 @@ services:
       API_TOKEN: local-development-token-at-least-32-characters
       PORT: 3000
       INGESTION_RATE_LIMIT: ${INGESTION_RATE_LIMIT:-120}
+      INGESTION_BATCH_FLUSH_MS: ${INGESTION_BATCH_FLUSH_MS:-2}
+      INGESTION_BATCH_MAX_EVENTS: ${INGESTION_BATCH_MAX_EVENTS:-100}
+      INGESTION_BATCH_MAX_BYTES: ${INGESTION_BATCH_MAX_BYTES:-262144}
+      INGESTION_BUFFER_MAX_EVENTS: ${INGESTION_BUFFER_MAX_EVENTS:-10000}
+      INGESTION_BUFFER_MAX_BYTES: ${INGESTION_BUFFER_MAX_BYTES:-16777216}
+      INGESTION_SHUTDOWN_TIMEOUT_MS: ${INGESTION_SHUTDOWN_TIMEOUT_MS:-10000}
       DASHBOARD_ORIGIN: ${DASHBOARD_ORIGIN:-}
       KAFKA_BROKERS: kafka:29092
       KAFKA_TOPIC: ${KAFKA_TOPIC:-analytics.events}
@@ -69,6 +75,7 @@ services:
       kafka:
         condition: service_healthy
     init: true
+    stop_grace_period: 15s
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s

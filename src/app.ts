@@ -104,10 +104,16 @@ export async function buildApp(config: Config, pool: DatabasePool, eventQueue: E
     if (!authorized(request, config.apiToken)) throw new HttpError(401, 'UNAUTHORIZED', 'Valid bearer token required');
   };
   const subscribers = new Set<ServerResponse>();
-  app.addHook('onClose', async () => {
+  // preClose runs before Fastify waits for active HTTP requests/SSE connections.
+  // Drain publication here so a stalled send cannot prevent the batch shutdown deadline.
+  app.addHook('preClose', async () => {
     for (const response of subscribers) response.end();
     subscribers.clear();
-    await eventQueue.close();
+    try {
+      await eventQueue.close();
+    } catch (error) {
+      app.log.error({ err: error }, 'Event queue shutdown failed');
+    }
   });
   const publish = (event: StreamEvent) => {
     const frame = `id: ${event.id}\nevent: event\ndata: ${JSON.stringify(event)}\n\n`;
