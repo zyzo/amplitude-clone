@@ -47,7 +47,21 @@ curl -sS -X POST http://127.0.0.1:3002/events \
   -d '{"events":[{"id":"d1fb87a6-47e0-4ef8-aec2-3470188ea784","occurred_at":"2026-09-30T10:00:00Z","type":"click","target_id":"signup-button"}]}'
 ```
 
-`GET /analytics` requires `Authorization: Bearer <API_TOKEN>`. Supply `from`, `to`, and `interval=minute|hour|day`; `type=click|view` is optional. The occurrence-time range is `[from,to)`. UTC-aligned buckets include empty buckets with zeros. Results are limited to 10,000 buckets and queries have a five-second database timeout. A late event may change a past bucket. Counts are JSON numbers; as with JavaScript numbers, very large counts beyond the safe integer range are unsupported.
+To populate the live dashboard with sample clicks and views, run the periodic event sender in another terminal:
+
+```sh
+npm run events:demo
+```
+
+It sends one event every 2 seconds to `http://127.0.0.1:3002`, alternating between `click` and `view`. Each event gets a fresh UUID; retries reuse that ID. Stop it with Ctrl+C. Configure it with `API_BASE_URL`, `EVENT_INTERVAL_MS` (minimum 100), and `EVENT_COUNT` (default `0`, meaning run until stopped), for example:
+
+```sh
+API_BASE_URL=http://127.0.0.1:3002 EVENT_INTERVAL_MS=1000 EVENT_COUNT=20 npm run events:demo
+```
+
+`GET /analytics` requires `Authorization: Bearer <API_TOKEN>`.  Supply `from`, `to`, and `interval=minute|hour|day`; `type=click|view` is optional. The occurrence-time range is `[from,to)`. UTC-aligned buckets include empty buckets with zeros. Results are limited to 10,000 buckets and queries have a five-second database timeout. A late event may change a past bucket. Counts are JSON numbers; as with JavaScript numbers, very large counts beyond the safe integer range are unsupported.
+
+`GET /events/snapshot` requires the same Bearer token and returns today’s UTC `[from,to)` window, database-backed click/view/total counts, and the 50 latest events from that UTC day. `GET /events/stream` is a protected Server-Sent Events endpoint. It sends newly inserted events only after the ingestion transaction commits; each frame has the event UUID as its SSE ID. Duplicate deliveries are not published. The stream is process-local and not a durable log; reconnecting clients must refresh `/events/snapshot` to recover any missed events. The initial deployment supports one backend process.
 
 ```sh
 curl -sS 'http://127.0.0.1:3002/analytics?from=2026-09-30T09%3A00%3A00Z&to=2026-09-30T12%3A00%3A00Z&interval=hour' \
@@ -58,7 +72,7 @@ curl -sS 'http://127.0.0.1:3002/analytics?from=2026-09-30T09%3A00%3A00Z&to=2026-
 
 ## Dashboard
 
-The historical analytics dashboard is a Vite/React app under `dashboard/`. It uses the existing `GET /analytics` endpoint; no snapshot or recent-event endpoint exists yet, so the first version intentionally focuses on historical analytics and does not implement SSE or polling.
+The analytics dashboard is a Vite/React app under `dashboard/`. It provides a live activity view backed by the protected snapshot and SSE endpoints, plus historical queries through `GET /analytics`. The live view reconnects using fetch-based SSE with the Bearer header, refreshes its database snapshot on each connection and every 30 seconds, and reconciles event IDs to avoid double counting. It displays today’s UTC totals and recent activity.
 
 The API response contract is:
 
@@ -76,7 +90,7 @@ The API response contract is:
 }
 ```
 
-`type` is echoed when supplied. Buckets are chronological and UTC-aligned, with empty buckets zero-filled; counts reflect the `[from,to)` occurrence-time range. The dashboard presents UTC datetime controls, totals and a time-series chart, and shows loading, empty, validation, API and unauthorized states. The admin token is held in React memory only and sent exclusively in the Bearer header; it is cleared when the page reloads or the user disconnects.
+`type` is echoed when supplied. Buckets are chronological and UTC-aligned, with empty buckets zero-filled; counts reflect the `[from,to)` occurrence-time range. The dashboard presents the live UTC activity view and historical UTC datetime controls, totals and a time-series chart, and shows loading, empty, validation, API and unauthorized states. The admin token is held in React memory only and sent exclusively in the Bearer header; it is cleared when the page reloads or the user disconnects.
 
 Set the dashboard backend URL in `dashboard/.env` (copy `dashboard/.env.example` to start), then run the dashboard and API separately:
 

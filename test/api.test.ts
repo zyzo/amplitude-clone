@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import type { AddressInfo } from 'node:net';
 import { after, before, test } from 'node:test';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
@@ -84,6 +85,59 @@ if (!databaseUrl) {
       assert.equal(count.rows[0].count, 0);
     } finally {
       await pool.query('ALTER TABLE events DROP CONSTRAINT test_reject_target');
+    }
+  });
+
+  test('admin snapshot is protected and initializes current UTC-day activity', async () => {
+    await pool.query('TRUNCATE events');
+    const current = event({ occurred_at: new Date(Date.now() - 1_000).toISOString(), type: 'view' });
+    assert.deepEqual((await post([current])).json(), { inserted: 1, duplicates: 0 });
+    const unauthorized = await app.inject('/events/snapshot');
+    assert.equal(unauthorized.statusCode, 401);
+    const wrongToken = await app.inject({ method: 'GET', url: '/events/snapshot', headers: { authorization: 'Bearer wrong-token' } });
+    assert.equal(wrongToken.statusCode, 401);
+    const snapshot = await app.inject({ method: 'GET', url: '/events/snapshot', headers: { authorization: `Bearer ${token}` } });
+    assert.equal(snapshot.statusCode, 200);
+    assert.deepEqual(snapshot.json().totals, { clicks: 0, views: 1, total: 1 });
+    assert.equal(snapshot.json().recent[0].id, current.id);
+  });
+
+  test('authenticated SSE publishes only newly committed events', async () => {
+    await pool.query('TRUNCATE events');
+    const streamingApp = await buildApp({ databaseUrl, apiToken: token, host: '127.0.0.1', port: 0, ingestionRateLimit: 10000 }, pool);
+    const abort = new AbortController();
+    try {
+      await streamingApp.listen({ host: '127.0.0.1', port: 0 });
+      const address = streamingApp.server.address() as AddressInfo;
+      const baseUrl = `http://127.0.0.1:${address.port}`;
+      assert.equal((await streamingApp.inject('/events/stream')).statusCode, 401);
+      assert.equal((await streamingApp.inject({ method: 'GET', url: '/events/stream', headers: { authorization: 'Bearer wrong-token' } })).statusCode, 401);
+      const response = await fetch(`${baseUrl}/events/stream`, {
+        headers: { authorization: `Bearer ${token}`, accept: 'text/event-stream', origin: 'http://localhost:5173' }, signal: abort.signal,
+      });
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('access-control-allow-origin'), 'http://localhost:5173');
+      const reader = response.body!.getReader();
+      const initial = await reader.read();
+      assert.match(new TextDecoder().decode(initial.value), /connected/);
+      const submitted = event({ occurred_at: new Date().toISOString() });
+      const first = await streamingApp.inject({ method: 'POST', url: '/events', payload: { events: [submitted] } });
+      assert.deepEqual(first.json(), { inserted: 1, duplicates: 0 });
+      const liveFrame = new TextDecoder().decode((await reader.read()).value);
+      assert.match(liveFrame, new RegExp(submitted.id));
+      assert.match(liveFrame, /signup/);
+      const retry = await streamingApp.inject({ method: 'POST', url: '/events', payload: { events: [submitted] } });
+      assert.deepEqual(retry.json(), { inserted: 0, duplicates: 1 });
+      const duplicateFrame = await Promise.race([
+        reader.read().then(({ value }) => new TextDecoder().decode(value)),
+        new Promise<string>((resolve) => setTimeout(() => resolve('no event'), 40)),
+      ]);
+      assert.equal(duplicateFrame, 'no event');
+      const snapshot = await app.inject({ method: 'GET', url: '/events/snapshot', headers: { authorization: `Bearer ${token}` } });
+      assert.deepEqual(snapshot.json().totals, { clicks: 1, views: 0, total: 1 });
+    } finally {
+      abort.abort();
+      await streamingApp.close();
     }
   });
 
@@ -178,6 +232,8 @@ if (!databaseUrl) {
     const spec = await app.inject('/openapi.json');
     assert.equal(spec.statusCode, 200);
     assert.ok(spec.json().paths['/events']);
+    assert.ok(spec.json().paths['/events/snapshot']);
+    assert.ok(spec.json().paths['/events/stream']);
     assert.ok(spec.json().paths['/analytics']);
   });
 }

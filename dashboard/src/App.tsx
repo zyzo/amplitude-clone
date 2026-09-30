@@ -1,16 +1,21 @@
-import { useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   API_BASE_URL,
   ApiError,
   datetimeInputValue,
   fetchAnalytics,
+  fetchSnapshot,
   inputValueToUtc,
+  startEventStream,
   validateRange,
   type AnalyticsBucket,
   type AnalyticsFilters,
   type EventFilter,
   type Interval,
+  type RecentEvent,
+  type SnapshotResponse,
+  type StreamEvent,
 } from './analytics';
 
 const initialTo = new Date();
@@ -33,6 +38,138 @@ function formatBucketTime(value: string, interval: Interval): string {
       ? { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'UTC', hourCycle: 'h23' }
       : { month: 'short', day: 'numeric', hour: '2-digit', timeZone: 'UTC', hourCycle: 'h23' };
   return new Intl.DateTimeFormat('en-US', options).format(date);
+}
+
+function LivePanel({ token, sessionId }: { token: string; sessionId: string }) {
+  const [snapshot, setSnapshot] = useState<SnapshotResponse | null>(null);
+  const [streamStatus, setStreamStatus] = useState<'connecting' | 'connected' | 'reconnecting' | 'error'>('connecting');
+  const [error, setError] = useState<Error | null>(null);
+  const refreshing = useRef(false);
+  const hasSnapshot = useRef(false);
+  const refreshAgain = useRef(false);
+  const buffered = useRef<StreamEvent[]>([]);
+  const seenIds = useRef(new Set<string>());
+
+  useEffect(() => {
+    let active = true;
+    const applyEvent = (event: StreamEvent) => {
+      if (seenIds.current.has(event.id)) return;
+      seenIds.current.add(event.id);
+      const maxSeen = 2_000;
+      if (seenIds.current.size > maxSeen) seenIds.current.delete(seenIds.current.values().next().value!);
+      setSnapshot((current) => {
+        if (!current) return current;
+        const occurred = Date.parse(event.occurred_at);
+        const eventDay = new Date(occurred).toISOString().slice(0, 10);
+        if (occurred < Date.parse(current.from) || eventDay !== current.from.slice(0, 10)) return current;
+        const click = event.type === 'click' ? 1 : 0;
+        const view = event.type === 'view' ? 1 : 0;
+        const recent: RecentEvent[] = [{ id: event.id, occurred_at: event.occurred_at, type: event.type, target_id: event.target_id },
+          ...current.recent.filter((item) => item.id !== event.id)]
+          .sort((left, right) => Date.parse(right.occurred_at) - Date.parse(left.occurred_at)).slice(0, 50);
+        return { ...current, totals: {
+          clicks: current.totals.clicks + click, views: current.totals.views + view, total: current.totals.total + 1,
+        }, recent };
+      });
+    };
+
+    const refresh = async () => {
+      if (!active) return;
+      if (refreshing.current) { refreshAgain.current = true; return; }
+      refreshing.current = true;
+      try {
+        const next = await fetchSnapshot(token, fetch, API_BASE_URL);
+        if (!active) return;
+        const recentIds = new Set(next.recent.map((event) => event.id));
+        hasSnapshot.current = true;
+        seenIds.current = recentIds;
+        const pending = buffered.current;
+        buffered.current = [];
+        setSnapshot(next);
+        for (const event of pending) {
+          if (recentIds.has(event.id)) continue;
+          applyEvent(event);
+        }
+        setError(null);
+      } catch (cause) {
+        if (active) setError(cause instanceof Error ? cause : new Error('Could not load the live snapshot.'));
+      } finally {
+        refreshing.current = false;
+        if (active && refreshAgain.current) {
+          refreshAgain.current = false;
+          void refresh();
+        }
+      }
+    };
+
+    const stop = startEventStream(token, {
+      onOpen: () => {
+        if (!active) return;
+        setStreamStatus('connected');
+        void refresh();
+      },
+      onConnecting: () => {
+        if (active) setStreamStatus((status) => status === 'connected' ? 'reconnecting' : 'connecting');
+      },
+      onError: (cause) => {
+        if (!active) return;
+        setError(cause);
+        setStreamStatus(cause instanceof ApiError && cause.status === 401 ? 'error' : 'reconnecting');
+      },
+      onEvent: (event) => {
+        if (!active || seenIds.current.has(event.id)) return;
+        if (refreshing.current || !hasSnapshot.current) buffered.current.push(event);
+        else applyEvent(event);
+      },
+    }, fetch, API_BASE_URL);
+    const poll = setInterval(() => { void refresh(); }, 30_000);
+    return () => {
+      active = false;
+      stop();
+      clearInterval(poll);
+      buffered.current = [];
+    };
+  }, [token, sessionId]);
+
+  const statusLabel = streamStatus === 'connected' ? 'Live updates connected'
+    : streamStatus === 'reconnecting' ? 'Reconnecting to live updates'
+      : streamStatus === 'error' ? 'Live updates unavailable' : 'Connecting to live updates';
+  const unauthorized = error instanceof ApiError && error.status === 401;
+  const displayTime = (value: string) => new Intl.DateTimeFormat('en-US', {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
+    timeZone: 'UTC', hourCycle: 'h23',
+  }).format(new Date(value));
+
+  return <>
+    <section className="live-status-card" aria-live="polite">
+      <span className={`live-indicator ${streamStatus}`} />
+      <div><strong>{statusLabel}</strong><p>Committed events appear within a few seconds. Counts are for today in UTC.</p></div>
+      {snapshot && <span className="live-window">{displayTime(snapshot.from)} – now · UTC</span>}
+    </section>
+    {error && <section className="error-card live-error" role="alert"><div className="state-icon">!</div><div>
+      <h2>{unauthorized ? 'Access denied' : 'Live data temporarily unavailable'}</h2>
+      <p>{unauthorized ? 'That token was not accepted. Disconnect and enter it again.' : error.message}</p>
+    </div></section>}
+    {!snapshot && !error && <section className="state-card" role="status"><span className="spinner" /> Loading today’s activity…</section>}
+    {snapshot && <>
+      <section className="metrics-grid" aria-label="Today's event totals">
+        <article className="metric-card total-card"><div className="metric-heading"><span>Total events today · UTC</span><span className="metric-symbol total-symbol">Σ</span></div><div className="metric-value">{formatNumber(snapshot.totals.total)}</div><div className="metric-foot">Database-backed, refreshed every 30 seconds</div></article>
+        <article className="metric-card"><div className="metric-heading"><span>Clicks today</span><span className="metric-symbol clicks-symbol">↗</span></div><div className="metric-value">{formatNumber(snapshot.totals.clicks)}</div><div className="metric-foot">Click events</div></article>
+        <article className="metric-card"><div className="metric-heading"><span>Views today</span><span className="metric-symbol views-symbol">◉</span></div><div className="metric-value">{formatNumber(snapshot.totals.views)}</div><div className="metric-foot">View events</div></article>
+      </section>
+      <section className="activity-card" aria-labelledby="activity-title">
+        <div className="activity-heading"><div><h2 id="activity-title">Recent activity</h2><p>Newest events from today, shown in UTC.</p></div><span>{snapshot.recent.length} recent</span></div>
+        {snapshot.recent.length === 0 ? <div className="activity-empty">No events recorded today yet.</div> : <ol className="activity-list">
+          {snapshot.recent.map((event) => <li key={event.id}>
+            <span className={`activity-type ${event.type}`}>{event.type === 'click' ? 'Click' : 'View'}</span>
+            <span className="activity-target" title={event.target_id}>{event.target_id}</span>
+            <time dateTime={event.occurred_at}>{displayTime(event.occurred_at)} UTC</time>
+          </li>)}
+        </ol>}
+        <div className="chart-footnote">Snapshot refreshes on stream connection and every 30 seconds to recover missed updates.</div>
+      </section>
+    </>}
+  </>;
 }
 
 function SeriesChart({ buckets, interval }: { buckets: AnalyticsBucket[]; interval: Interval }) {
@@ -106,6 +243,7 @@ export default function App() {
   const [tokenInput, setTokenInput] = useState('');
   const [token, setToken] = useState('');
   const [sessionId, setSessionId] = useState('');
+  const [mode, setMode] = useState<'live' | 'history'>('live');
   const [fromInput, setFromInput] = useState(datetimeInputValue(initialFrom));
   const [toInput, setToInput] = useState(datetimeInputValue(initialTo));
   const [type, setType] = useState<EventFilter>('all');
@@ -118,7 +256,7 @@ export default function App() {
   const analytics = useQuery({
     queryKey: ['analytics', sessionId, from, to, interval, type],
     queryFn: () => fetchAnalytics(filters, token, fetch, API_BASE_URL),
-    enabled: Boolean(token && !rangeError),
+    enabled: Boolean(token && mode === 'history' && !rangeError),
     staleTime: 30_000,
   });
   const error = analytics.error;
@@ -161,7 +299,7 @@ export default function App() {
           <span>northstar<span className="brand-light"> / analytics</span></span>
         </a>
         <div className="topbar-right">
-          <span className="system-status"><span className="status-dot" /> Historical data</span>
+          <span className="system-status"><span className="status-dot" /> {mode === 'live' ? 'Live analytics' : 'Historical data'}</span>
           {token && <button className="quiet-button" onClick={disconnect} type="button">Disconnect</button>}
         </div>
       </header>
@@ -181,7 +319,7 @@ export default function App() {
             <div className="auth-icon" aria-hidden="true">⌘</div>
             <div className="auth-copy">
               <h2 id="auth-title">Connect to your analytics</h2>
-              <p>Enter your admin API token to load historical event data. Your token stays in memory and is never saved in this browser.</p>
+              <p>Enter your admin API token to load live and historical event data. Your token stays in memory and is never saved in this browser.</p>
             </div>
             <form className="token-form" onSubmit={connect}>
               <label htmlFor="api-token">Admin API token</label>
@@ -193,6 +331,11 @@ export default function App() {
           </section>
         ) : (
           <>
+            <nav className="mode-tabs" aria-label="Dashboard view">
+              <button type="button" aria-pressed={mode === 'live'} onClick={() => setMode('live')}>Live activity</button>
+              <button type="button" aria-pressed={mode === 'history'} onClick={() => setMode('history')}>Historical analytics</button>
+            </nav>
+            {mode === 'live' ? <LivePanel token={token} sessionId={sessionId} /> : <>
             <section className="filters-card" aria-label="Analytics filters">
               <div className="filters-heading">
                 <div><h2>Explore events</h2><p>Choose a time range and breakdown for your data.</p></div>
@@ -254,9 +397,10 @@ export default function App() {
                 </section>
               </>
             )}
+            </>}
           </>
         )}
-        <footer className="page-footer"><span>Northstar Analytics</span><span>Historical data · no live stream</span></footer>
+        <footer className="page-footer"><span>Northstar Analytics</span><span>{mode === 'live' ? 'Live activity · today in UTC' : 'Historical analytics · UTC'}</span></footer>
       </div>
     </main>
   );

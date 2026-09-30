@@ -52,6 +52,32 @@ h1 { color: #17243a; font: 700 29px/1.25 Manrope, sans-serif; letter-spacing: -.
 .primary-button:hover:not(:disabled) { background: #405fd3; }
 .primary-button:disabled { cursor: not-allowed; opacity: .52; }
 .primary-button span { margin-left: 8px; }
+.mode-tabs { display: flex; gap: 5px; width: fit-content; margin: 0 0 16px; padding: 4px; border: 1px solid #e7ebf2; border-radius: 8px; background: #eef1f6; }
+.mode-tabs button { padding: 8px 13px; border: 0; border-radius: 5px; background: transparent; color: #78869a; font-size: 11px; font-weight: 600; }
+.mode-tabs button[aria-pressed="true"] { background: #fff; color: #3e5fd3; box-shadow: 0 1px 3px rgb(31 48 76 / 10%); }
+.live-status-card, .activity-card { margin-top: 15px; border: 1px solid #e8edf3; border-radius: 10px; background: #fff; box-shadow: 0 2px 7px rgb(31 48 76 / 2%); }
+.live-status-card { display: flex; align-items: center; gap: 12px; padding: 16px 19px; }
+.live-status-card strong { color: #4e5d72; font-size: 11px; }
+.live-status-card p { margin-top: 4px; color: #929eae; font-size: 10px; }
+.live-indicator { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%; background: #aab3c1; }
+.live-indicator.connected { background: #21ad87; box-shadow: 0 0 0 4px #e8f8f2; }
+.live-indicator.reconnecting, .live-indicator.connecting { background: #e2a33e; box-shadow: 0 0 0 4px #fff6e7; }
+.live-indicator.error { background: #d45b5b; box-shadow: 0 0 0 4px #fff0ef; }
+.live-window { margin-left: auto; color: #8b97a8; font-size: 10px; white-space: nowrap; }
+.live-error { margin-top: 12px; }
+.activity-card { padding: 20px 22px 12px; }
+.activity-heading { display: flex; justify-content: space-between; align-items: flex-start; }
+.activity-heading h2 { font: 700 15px Manrope, sans-serif; }
+.activity-heading p { margin-top: 5px; color: #8793a5; font-size: 11px; }
+.activity-heading > span { color: #8b97a8; font-size: 10px; }
+.activity-list { list-style: none; margin: 14px 0 12px; padding: 0; }
+.activity-list li { display: grid; grid-template-columns: 58px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 43px; border-top: 1px solid #f0f2f6; }
+.activity-type { width: fit-content; padding: 4px 7px; border-radius: 4px; font-size: 9px; font-weight: 700; }
+.activity-type.click { color: #168667; background: #e8f8f2; }
+.activity-type.view { color: #b17a22; background: #fff6e7; }
+.activity-target { overflow: hidden; color: #4e5d72; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.activity-list time { color: #929eae; font-size: 10px; white-space: nowrap; }
+.activity-empty { display: grid; min-height: 125px; place-items: center; color: #8996a8; font-size: 11px; }
 .filters-card { padding: 22px 23px 20px; }
 .filters-heading { display: flex; align-items: flex-start; justify-content: space-between; }
 .quick-ranges { display: flex; gap: 6px; }
@@ -101,6 +127,7 @@ h1 { color: #17243a; font: 700 29px/1.25 Manrope, sans-serif; letter-spacing: -.
   .intro-row { align-items: flex-start; gap: 12px; padding-top: 30px; }
   .range-badge { margin-top: 15px; white-space: nowrap; font-size: 9px; padding: 8px; }
   .filter-controls { grid-template-columns: 1fr 1fr; }
+  .live-window { display: none; }
   .metrics-grid { gap: 9px; }
   .metric-card { min-height: 110px; padding: 14px; }
   .metric-value { font-size: 21px; }
@@ -113,6 +140,7 @@ h1 { color: #17243a; font: 700 29px/1.25 Manrope, sans-serif; letter-spacing: -.
   .auth-card { padding: 19px; grid-template-columns: 38px 1fr; gap: 12px; }.auth-icon { width: 36px; height: 36px; }
   .token-form { grid-column: 1 / -1; margin-top: 19px; }
   .filters-card { padding: 17px 15px; }.filters-heading { gap: 10px; }.filters-heading p { max-width: 210px; }.quick-ranges { flex-direction: column; }
+  .activity-card { padding: 16px 13px 11px; }.activity-list li { grid-template-columns: 48px minmax(0, 1fr); gap: 8px; padding: 7px 0; }.activity-list time { grid-column: 2; }.mode-tabs button { padding: 8px 10px; font-size: 10px; }
   .filter-controls { gap: 11px 9px; }.field input, .field select { font-size: 10px; padding-left: 7px; }
   .metrics-grid { grid-template-columns: 1fr; }.metric-card { min-height: auto; padding: 13px 16px; }.metric-value { margin-top: 7px; }
   .chart-card { padding: 17px 13px 12px; }.chart-header { padding: 0 5px; }.chart-legend { margin-left: 13px; }.chart-x-label { font-size: 8px; }

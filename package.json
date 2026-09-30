@@ -10,6 +10,7 @@
     "dashboard:test": "vitest run --config dashboard/vite.config.ts",
     "dev": "docker compose -f compose.dev.yaml up --build",
     "dev:server": "tsx watch src/server.ts",
+    "events:demo": "node scripts/send-test-events.mjs",
     "start": "node dist/src/server.js",
     "migrate": "node dist/src/migrate.js",
     "test": "npm run build && node --test dist/test/*.test.js && npm run dashboard:test",

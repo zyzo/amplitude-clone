@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ApiError, buildAnalyticsUrl, datetimeInputValue, fetchAnalytics, inputValueToUtc, validateRange, type AnalyticsFilters } from './analytics';
+import { ApiError, buildAnalyticsUrl, datetimeInputValue, fetchAnalytics, fetchSnapshot, inputValueToUtc, startEventStream, validateRange, type AnalyticsFilters } from './analytics';
 
 const filters: AnalyticsFilters = {
   from: '2026-09-30T09:00:00Z',
@@ -46,6 +46,29 @@ describe('analytics API helpers', () => {
     });
     fetcher.mockResolvedValue(new Response(JSON.stringify({ error: { code: 'UNAUTHORIZED', message: 'Valid bearer token required' } }), { status: 401 }));
     await expect(fetchAnalytics(filters, 'wrong-token', fetcher)).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it('fetches a protected live snapshot without exposing the token in its URL', async () => {
+    const snapshot = { from: filters.from, to: filters.to, totals: { clicks: 1, views: 2, total: 3 }, recent: [] };
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify(snapshot), { status: 200 }));
+    await expect(fetchSnapshot('admin-secret', fetcher, 'https://analytics.example')).resolves.toEqual(snapshot);
+    expect(fetcher).toHaveBeenCalledWith('https://analytics.example/events/snapshot', {
+      headers: { Authorization: 'Bearer admin-secret', Accept: 'application/json' },
+    });
+  });
+
+  it('uses authenticated fetch-based SSE and parses event frames', async () => {
+    const event = { id: 'event-id', occurred_at: filters.from, received_at: filters.from, type: 'click', target_id: 'button' };
+    const frame = `id: ${event.id}\nevent: event\ndata: ${JSON.stringify(event)}\n\n`;
+    const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(frame)); controller.close(); } });
+    const fetcher = vi.fn().mockResolvedValue(new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+    const onEvent = vi.fn();
+    const stop = startEventStream('admin-secret', { onOpen: vi.fn(), onEvent, onError: vi.fn(), onConnecting: vi.fn() }, fetcher, 'https://analytics.example');
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledWith(event));
+    stop();
+    expect(fetcher).toHaveBeenCalledWith('https://analytics.example/events/stream', expect.objectContaining({
+      headers: { Authorization: 'Bearer admin-secret', Accept: 'text/event-stream' },
+    }));
   });
 
   it('validates half-open range selections and translates UTC datetime inputs', () => {
