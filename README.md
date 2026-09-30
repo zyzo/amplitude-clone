@@ -110,10 +110,14 @@ npm run dashboard:dev
 
 ## Verification
 
-`npm test` runs the backend build, PostgreSQL integration tests (when `TEST_DATABASE_URL` is configured), and dashboard API/UI tests. Run the PostgreSQL integration tests in Docker with a dedicated temporary database:
+`npm test` runs the build, backend HTTP contract tests, PostgreSQL integration tests (when `TEST_DATABASE_URL` is configured), and dashboard API/UI tests. HTTP contract tests always run and need neither PostgreSQL nor Kafka; only the PostgreSQL suite is skipped without `TEST_DATABASE_URL`.
+
+Run `npm run test:backend` for backend-only checks or `npm run test:backend:watch` for watch mode.
+
+Run the PostgreSQL integration tests in Docker with a dedicated temporary database:
 
 ```sh
 docker compose -f compose.test.yaml run --build --rm integration-test
 ```
 
-The test database lives in a temporary filesystem and is separate from the deployment database. It is discarded when its container is removed. The test runner uses the same Docker build stage as the application build, including development dependencies. For local Node.js testing instead, set `TEST_DATABASE_URL` to a disposable PostgreSQL database whose name ends in `_test`; tests truncate its `events` table.
+The test database lives in a temporary filesystem and is separate from the deployment database. It is discarded when its container is removed. The test runner uses the same Docker build stage as the application build, including development dependencies. For local Node.js testing instead, set `TEST_DATABASE_URL` to a disposable PostgreSQL database whose name ends in `_test`; tests truncate its `events` table and temporarily change a constraint and migration metadata. Database tests run serially; do not run multiple test processes against the same database.

@@ -16,6 +16,8 @@
     "start": "node dist/src/server.js",
     "migrate": "node dist/src/migrate.js",
     "test": "npm run build && node --test dist/test/*.test.js && npm run dashboard:test",
+    "test:backend": "tsc -p tsconfig.json && node --test dist/test/*.test.js",
+    "test:backend:watch": "tsx --test --watch test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {
