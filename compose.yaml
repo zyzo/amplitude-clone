@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: analytics
+      POSTGRES_USER: analytics
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${DB_PORT:-54329}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U analytics -d analytics"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build: .
+    command: ["node", "dist/src/migrate.js"]
+    environment:
+      DATABASE_URL: postgres://analytics:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/analytics
+      API_TOKEN: ${API_TOKEN:?Set API_TOKEN in .env}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgres://analytics:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/analytics
+      API_TOKEN: ${API_TOKEN:?Set API_TOKEN in .env}
+      PORT: 3000
+      INGESTION_RATE_LIMIT: ${INGESTION_RATE_LIMIT:-120}
+    ports:
+      - "127.0.0.1:${API_PORT:-3000}:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    init: true
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_data:

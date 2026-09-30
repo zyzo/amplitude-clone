@@ -1,0 +1,25 @@
+services:
+  test-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: analytics_test
+      POSTGRES_USER: analytics
+      POSTGRES_PASSWORD: test-only-password
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U analytics -d analytics_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  integration-test:
+    build:
+      context: .
+      target: build
+    command: ["npm", "test"]
+    environment:
+      TEST_DATABASE_URL: postgres://analytics:test-only-password@test-db:5432/analytics_test
+    depends_on:
+      test-db:
+        condition: service_healthy
