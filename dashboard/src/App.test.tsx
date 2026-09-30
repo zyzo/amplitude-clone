@@ -104,8 +104,8 @@ describe('dashboard', () => {
     await user.click(await screen.findByRole('button', { name: 'Historical analytics' }));
     await screen.findByRole('heading', { name: 'Access denied' });
     const requestsBeforeInvalidRange = unauthorizedFetch.mock.calls.length;
-    fireEvent.change(screen.getByLabelText(/from/i), { target: { value: '2099-01-01T00:00' } });
-    fireEvent.change(screen.getByLabelText(/to/i), { target: { value: '2000-01-01T00:00' } });
+    fireEvent.change(screen.getByLabelText('From UTC'), { target: { value: '2099-01-01T00:00' } });
+    fireEvent.change(screen.getByLabelText('To UTC · exclusive'), { target: { value: '2000-01-01T00:00' } });
     expect(await screen.findByText(/start time must be earlier/i)).toBeTruthy();
     expect(unauthorizedFetch).toHaveBeenCalledTimes(requestsBeforeInvalidRange);
   });
@@ -153,6 +153,43 @@ describe('dashboard', () => {
     expect(screen.getByText(/Live updates connected|Reconnecting to live updates/)).toBeTruthy();
     const streamCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/events/stream'));
     expect(streamCall?.[1]?.headers).toMatchObject({ Authorization: 'Bearer admin-secret', Accept: 'text/event-stream' });
+  });
+
+  it('filters the live trace by event type and target without changing collector totals', async () => {
+    const user = userEvent.setup();
+    const recent = [
+      { id: 'click-1', occurred_at: '2026-09-30T11:59:00.000Z', type: 'click' as const, target_id: 'pricing-cta' },
+      { id: 'view-1', occurred_at: '2026-09-30T11:58:00.000Z', type: 'view' as const, target_id: 'docs/getting-started' },
+      { id: 'click-2', occurred_at: '2026-09-30T11:57:00.000Z', type: 'click' as const, target_id: 'signup-submit' },
+    ];
+    const snapshot = { ...liveSnapshot, totals: { clicks: 2, views: 1, total: 3 }, recent };
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/events/stream')) return Promise.resolve(new Response(': connected\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+      if (url.endsWith('/events/snapshot')) return Promise.resolve(new Response(JSON.stringify(snapshot), { status: 200 }));
+      return Promise.resolve(successResponse());
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderApp();
+    await user.type(screen.getByLabelText('Admin API token'), 'admin-secret');
+    await user.click(screen.getByRole('button', { name: /connect/i }));
+    const totals = within(await screen.findByRole('region', { name: "Today's event totals" }));
+    expect(totals.getByText('3')).toBeTruthy();
+
+    const filters = screen.getByRole('group', { name: 'Filter recent events by type' });
+    await user.click(within(filters).getByRole('button', { name: 'Clicks' }));
+    expect(screen.getByText('pricing-cta')).toBeTruthy();
+    expect(screen.getByText('signup-submit')).toBeTruthy();
+    expect(screen.queryByText('docs/getting-started')).toBeNull();
+
+    await user.type(screen.getByRole('searchbox', { name: 'Filter targets' }), 'pricing');
+    expect(screen.getByText('pricing-cta')).toBeTruthy();
+    expect(screen.queryByText('signup-submit')).toBeNull();
+    expect(totals.getByText('3')).toBeTruthy();
+    await user.clear(screen.getByRole('searchbox', { name: 'Filter targets' }));
+    await user.click(within(filters).getByRole('button', { name: 'Views' }));
+    expect(screen.getByText('docs/getting-started')).toBeTruthy();
+    expect(screen.queryByText('pricing-cta')).toBeNull();
   });
 
   it('shows a loading state while the analytics request is pending', async () => {
