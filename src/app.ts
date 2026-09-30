@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyRequest } from 'fastify';
+import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import swagger from '@fastify/swagger';
 import { z } from 'zod';
@@ -73,6 +74,11 @@ export async function buildApp(config: Config, pool: DatabasePool): Promise<Fast
     logger: { redact: ['req.headers.authorization', 'request.headers.authorization', 'headers.authorization'] },
     bodyLimit: 128 * 1024,
     ajv: { customOptions: { allErrors: true, removeAdditional: false, coerceTypes: false, useDefaults: false } },
+  });
+  await app.register(cors, {
+    origin: config.dashboardOrigin ?? ['http://localhost:5173', 'http://127.0.0.1:5173'],
+    methods: ['GET', 'OPTIONS'],
+    allowedHeaders: ['Accept', 'Authorization'],
   });
   await app.register(swagger, {
     openapi: {

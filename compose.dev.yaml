@@ -24,8 +24,9 @@ services:
       DATABASE_URL: postgres://analytics:local-development-password@db:5432/analytics
       API_TOKEN: local-development-token-at-least-32-characters
       PORT: 3000
+      DASHBOARD_ORIGIN: ${DASHBOARD_ORIGIN:-}
     ports:
-      - "127.0.0.1:3001:3000"
+      - "127.0.0.1:3002:3000"
     volumes:
       - ./src:/app/src
       - ./migrations:/app/migrations

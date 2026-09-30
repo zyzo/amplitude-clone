@@ -152,6 +152,26 @@ if (!databaseUrl) {
     }
   });
 
+  test('dashboard CORS preflight permits the configured local origin and bearer header', async () => {
+    const allowed = await app.inject({
+      method: 'OPTIONS', url: '/analytics',
+      headers: {
+        origin: 'http://localhost:5173',
+        'access-control-request-method': 'GET',
+        'access-control-request-headers': 'authorization',
+      },
+    });
+    assert.equal(allowed.statusCode, 204);
+    assert.equal(allowed.headers['access-control-allow-origin'], 'http://localhost:5173');
+    assert.match(String(allowed.headers['access-control-allow-headers']), /authorization/i);
+
+    const rejected = await app.inject({
+      method: 'OPTIONS', url: '/analytics',
+      headers: { origin: 'https://untrusted.example', 'access-control-request-method': 'GET' },
+    });
+    assert.equal(rejected.headers['access-control-allow-origin'], undefined);
+  });
+
   test('health checks and OpenAPI document are available', async () => {
     assert.equal((await app.inject('/health/live')).statusCode, 200);
     assert.equal((await app.inject('/health/ready')).statusCode, 200);

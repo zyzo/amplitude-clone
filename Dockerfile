@@ -6,6 +6,7 @@ COPY tsconfig.json ./
 COPY src ./src
 COPY test ./test
 COPY migrations ./migrations
+COPY dashboard ./dashboard
 RUN npm run build
 
 FROM build AS development
